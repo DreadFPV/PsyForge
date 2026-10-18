@@ -1,0 +1,8 @@
+build/
+JUCE/
+dist/
+render/
+.DS_Store
+*.user
+.vs/
+.idea/

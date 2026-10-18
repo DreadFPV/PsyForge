@@ -1,0 +1,91 @@
+name: Build PsyForge
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            cmake_args: -A x64
+          - name: macOS
+            os: macos-14
+            cmake_args: -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.4-${{ matrix.os }}
+
+      - name: Configure
+        shell: bash
+        run: cmake -B build ${{ matrix.cmake_args }}
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 4 2>&1 | tee build.log
+
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "error|fatal" build.log | grep -v "warning" | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -r "build/PsyForge_artefacts/Release/VST3/PsyForge.vst3" dist/
+          cp "build/PsyForge_artefacts/Release/Standalone/PsyForge.exe" dist/
+          cp README.md dist/
+          cd dist && 7z a ../PsyForge-Windows.zip . > /dev/null
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp -R "build/PsyForge_artefacts/Release/VST3/PsyForge.vst3" dist/
+          cp -R "build/PsyForge_artefacts/Release/AU/PsyForge.component" dist/
+          cp -R "build/PsyForge_artefacts/Release/Standalone/PsyForge.app" dist/
+          # Ad-hoc-Signatur, damit Apple Silicon die Plugins lädt
+          codesign --force --deep -s - dist/PsyForge.vst3 dist/PsyForge.component dist/PsyForge.app
+          cp README.md dist/
+          cd dist && zip -qry ../PsyForge-macOS.zip .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PsyForge-${{ matrix.name }}
+          path: PsyForge-*.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
