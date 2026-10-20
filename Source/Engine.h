@@ -148,7 +148,9 @@ inline float driveShape (float x, float drive, int type) noexcept
 struct SynthParams
 {
     // Global
-    float key = 6, a4 = 440, master = 0.8f, kickCh = 1, bassCh = 2, note = 30, bpm = 145, pattern = 0, limiter = 1;
+    float key = 6, a4 = 440, master = 0.8f, note = 30, bpm = 145, limiter = 1, inst = 0, midiFilter = 0;
+    // Pattern / Sequencer
+    float style = 2, section = 2, bassRhy = 0, variation = 0, swing = 0, humanize = 0.3f, seqOn = 0, source = 0;
 
     // Kick – Pitch
     float kLevel = 0.9f, kStartHz = 2600, kPunchHz = 190, kEndHz = 48, kClickTime = 1.2f, kSweepTime = 16, kDrift = 1.0f,
@@ -170,8 +172,32 @@ struct SynthParams
     // Bass – Filter
     float bCutoff = 420, bReso = 0.2f, bFenv = 3.0f, bFattack = 0, bFdecay = 45, bKeytrack = 0.5f, bSlope = 1;
     // Bass – Pluck / Drive / Ducking / EQ
-    float bPluck = 0, bPluckDecay = 8, bDrive = 0.2f, bDriveType = 0, bDuck = 0.6f, bDuckRelease = 60;
+    float bPluck = 0, bPluckDecay = 8, bDrive = 0.2f, bDriveType = 0, bDuck = 0.6f, bDuckRelease = 60, bDuckSrc = 1;
     float bLowCut = 30, bNotchDb = 0, bHighCut = 9000;
+
+    // Snare
+    float sLevel = 0.8f, sTone1 = 190, sTone2 = 330, sToneMix = 0.35f, sBodyLevel = 0.7f, sBodyDecay = 70, sPitchDrop = 7, sPitchTime = 10,
+          sNoiseLevel = 0.7f, sNoiseHp = 1500, sNoiseBp = 5000, sNoiseQ = 0.8f, sNoiseAttack = 0.5f, sNoiseDecay = 140,
+          sSnap = 0.3f, sSnapHz = 3000, sDrive = 0.3f, sDriveType = 0, sLowCut = 80, sHighCut = 16000, sVelSens = 0.5f, sKeyLock = 0;
+    // Clap
+    float cLevel = 0.8f, cBursts = 3, cSpacing = 10, cJitter = 0.2f, cBurstDecay = 3.5f, cTailLevel = 0.7f, cTailDecay = 180,
+          cBpHz = 1400, cBpQ = 1.3f, cHpHz = 600, cLpHz = 12000, cDrive = 0.2f, cVelSens = 0.5f;
+    // Metall-Stimmen: Closed Hat (h), Open Hat (o), Ride (r)
+    float hLevel = 0.6f, hFreq = 360, hInharm = 0.5f, hNoise = 0.35f, hBpHz = 9000, hBpQ = 0.8f, hHpHz = 7000, hAttack = 0.3f, hDecay = 45,
+          hBell = 0, hBellHz = 800, hDrive = 0.1f, hHighCut = 18000, hVelSens = 0.6f;
+    float oLevel = 0.55f, oFreq = 340, oInharm = 0.5f, oNoise = 0.35f, oBpHz = 8500, oBpQ = 0.8f, oHpHz = 6000, oAttack = 0.5f, oDecay = 260,
+          oBell = 0, oBellHz = 800, oDrive = 0.1f, oHighCut = 18000, oVelSens = 0.5f;
+    float rLevel = 0.45f, rFreq = 420, rInharm = 0.6f, rNoise = 0.25f, rBpHz = 6000, rBpQ = 0.7f, rHpHz = 3500, rAttack = 1, rDecay = 700,
+          rBell = 0.35f, rBellHz = 900, rDrive = 0.05f, rHighCut = 16000, rVelSens = 0.5f;
+    // Perc (tonal, Note A1 = Grundton)
+    float pLevel = 0.7f, pTune = 220, pWave = 0, pPitchEnv = 12, pPitchTime = 12, pFm = 0, pFmRatio = 1.5f, pAttack = 0.2f, pDecay = 120,
+          pNoise = 0, pLpHz = 8000, pReso = 0.2f, pDrive = 0.3f, pSnap = 3, pVelSens = 0.5f;
+    // Zap
+    float zLevel = 0.6f, zStartHz = 3000, zEndHz = 60, zSweep = 250, zCurve = 0.6f, zWave = 0, zLpRatio = 4, zReso = 0.3f,
+          zLength = 350, zDrive = 0.2f, zVelSens = 0.5f;
+    // Riser
+    float xLevel = 0.55f, xLength = 8, xNoise = 0.7f, xTone = 0.4f, xStartHz = 200, xEndHz = 6000, xCurve = 0.5f, xReso = 0.4f,
+          xRelease = 300, xDrive = 0.1f;
 };
 
 // Länge der Kick (Sync)
@@ -515,112 +541,6 @@ struct BassVoice
 };
 
 //==============================================================================
-// Komplette Engine: Kick + Bass + Ducking + verzögerte Bass-Noten (Phasen-Ausrichtung)
-class Engine
-{
-public:
-    void prepare (double sampleRate)
-    {
-        sr = (float) sampleRate;
-        kick.prepare (sr); bass.prepare (sr);
-        duck = 0; pendingCount = 0;
-        setParams (params, bpm);
-    }
-    void setParams (const SynthParams& p, double hostBpm, float followHz = -1.0f)
-    {
-        params = p; bpm = hostBpm;
-        if (followHz >= 0.0f) lastFollowHz = followHz;
-        ks = makeKickShape (p, bpm, lastFollowHz);
-        bs = makeBassShape (p);
-        kick.updateEq (p);
-        bass.updateEq (p, ks.endHz);
-        duckTau = std::max (0.0005f, p.bDuckRelease * 0.001f / 2.302585f);
-    }
-    const KickShape& kickShape() const { return ks; }
-
-    void kickOn (float vel, int midiNote = -1)
-    {
-        if (params.kFollow > 0.5f && midiNote >= 0)
-        {
-            lastFollowHz = noteHz (midiNote, params.a4);
-            ks = makeKickShape (params, bpm, lastFollowHz);
-        }
-        kick.trigger (vel, ks);
-        duck = 1.0f;
-    }
-    void bassOn (int midiNote, float vel, int delaySamples = -1)
-    {
-        if (delaySamples < 0) delaySamples = (int) (params.bOffset * 0.001f * sr);
-        if (delaySamples <= 0) { startBass (midiNote, vel); return; }
-        if (pendingCount < (int) pending.size()) pending[(size_t) pendingCount++] = { midiNote, vel, delaySamples, true };
-    }
-    void bassOff (int midiNote)
-    {
-        // noch wartende Note-Ons dieser Note bekommen ein verzögertes Note-Off
-        for (int i = 0; i < pendingCount; ++i)
-            if (pending[(size_t) i].note == midiNote && pending[(size_t) i].on)
-            {
-                if (pendingCount < (int) pending.size())
-                    pending[(size_t) pendingCount++] = { midiNote, 0.0f, pending[(size_t) i].delay + 1, false };
-                return;
-            }
-        if (midiNote == currentNote) bass.noteOff();
-    }
-    void allOff() { bass.noteOff(); pendingCount = 0; }
-
-    // ein Sample: Kick und Bass getrennt
-    inline void tick (float& kOut, float& bOut) noexcept
-    {
-        if (pendingCount > 0)
-        {
-            for (int i = 0; i < pendingCount; )
-            {
-                auto& e = pending[(size_t) i];
-                if (--e.delay <= 0)
-                {
-                    if (e.on) startBass (e.note, e.vel);
-                    else if (e.note == currentNote) bass.noteOff();
-                    pending[(size_t) i] = pending[(size_t) --pendingCount];
-                }
-                else ++i;
-            }
-        }
-        kOut = kick.tick (ks);
-        float b = bass.tick (bs);
-        if (params.bDuck > 0.0f && duck > 0.0001f)
-        {
-            b *= 1.0f - params.bDuck * duck;
-            duck *= std::exp (-1.0f / (duckTau * sr));
-        }
-        bOut = b;
-    }
-
-    float lastKickFreq() const { return kick.lastFreq; }
-    float lastKickAmp() const { return kick.lastAmp; }
-    float lastBassAmp() const { return bass.lastAmp; }
-    bool kickActive() const { return kick.active; }
-
-private:
-    void startBass (int note, float vel)
-    {
-        currentNote = note;
-        bass.noteOn (bassNoteHz (params, note), vel, bs);
-    }
-    struct Pending { int note; float vel; int delay; bool on; };
-
-    SynthParams params;
-    KickShape ks {};
-    BassShape bs {};
-    KickVoice kick;
-    BassVoice bass;
-    float sr = 44100.0f, duck = 0.0f, duckTau = 0.02f, lastFollowHz = 0.0f;
-    double bpm = 145.0;
-    int currentNote = -1;
-    std::array<Pending, 64> pending {};
-    int pendingCount = 0;
-};
-
-//==============================================================================
 // Offline-Render (Anzeige, Export, Analyse)
 struct RenderOut
 {
@@ -671,63 +591,4 @@ inline RenderOut renderBass (const SynthParams& p, double sr, double bpm, int no
     return renderBassHz (p, sr, bassNoteHz (p, note), sixteenth * 0.7f, sixteenth * 1.6f, vel);
 }
 
-//==============================================================================
-// Vorschau-Muster (Kick auf jedem Viertel, Bass-Positionen in Bruchteilen eines Beats)
-enum LoopPattern { PatKBBB = 0, PatOffbeat, PatGallop, PatTriplet, NumPatterns };
-
-struct PatternStep { float pos; float len; float vel; };
-inline const std::vector<PatternStep>& bassStepsForPattern (int pattern)
-{
-    // statisch: keine Speicheranforderung im Audio-Thread
-    static const std::vector<PatternStep> kbbb    { { 0.25f, 0.17f, 0.8f }, { 0.5f, 0.17f, 1.0f }, { 0.75f, 0.17f, 1.0f } };
-    static const std::vector<PatternStep> offbeat { { 0.5f, 0.35f, 1.0f } };
-    static const std::vector<PatternStep> gallop  { { 0.5f, 0.17f, 0.9f }, { 0.75f, 0.17f, 1.0f } };
-    static const std::vector<PatternStep> triplet { { 1.0f / 3.0f, 0.2f, 0.85f }, { 2.0f / 3.0f, 0.2f, 1.0f } };
-    switch (pattern)
-    {
-        case PatOffbeat: return offbeat;
-        case PatGallop:  return gallop;
-        case PatTriplet: return triplet;
-        default:         return kbbb;
-    }
-}
-
-inline RenderOut renderLoop (const SynthParams& p, double sr, double bpm, int beats, int note, int pattern)
-{
-    RenderOut r; r.sr = sr;
-    Engine e; e.prepare (sr); e.setParams (p, bpm, 0.0f);
-    const double spb = 60.0 / std::max (40.0, bpm) * sr;
-    const int n = (int) (spb * beats);
-    r.audio.resize ((size_t) n); r.amp.resize ((size_t) n);
-    const auto steps = bassStepsForPattern (pattern);
-    struct Ev { int pos; int type; float vel; };   // 0 kick, 1 bass on, 2 bass off
-    std::vector<Ev> evs;
-    for (int b = 0; b < beats; ++b)
-    {
-        evs.push_back ({ (int) (b * spb), 0, 1.0f });
-        for (auto& s : steps)
-        {
-            evs.push_back ({ (int) ((b + s.pos) * spb), 1, s.vel });
-            evs.push_back ({ (int) ((b + s.pos + s.len) * spb), 2, 0 });
-        }
-    }
-    std::sort (evs.begin(), evs.end(), [] (const Ev& a, const Ev& b) { return a.pos != b.pos ? a.pos < b.pos : a.type > b.type; });
-    size_t ei = 0;
-    for (int i = 0; i < n; ++i)
-    {
-        while (ei < evs.size() && evs[ei].pos <= i)
-        {
-            const auto& ev = evs[ei++];
-            if (ev.type == 0) e.kickOn (ev.vel);
-            else if (ev.type == 1) e.bassOn (note, ev.vel);
-            else e.bassOff (note);
-        }
-        float k, b; e.tick (k, b);
-        float s = (k + b) * p.master;
-        if (p.limiter > 0.5f) s = std::tanh (s);
-        r.audio[(size_t) i] = s;
-        r.amp[(size_t) i] = std::max (e.lastKickAmp(), e.lastBassAmp());
-    }
-    return r;
-}
 } // namespace pf

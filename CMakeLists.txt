@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(PsyForge VERSION 0.1.0)
+project(PsyForge VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,7 +41,8 @@ juce_add_plugin(PsyForge
 
 target_sources(PsyForge PRIVATE
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/Patterns.cpp)
 
 target_include_directories(PsyForge PRIVATE Source)
 # Quelltexte sind UTF-8 (Umlaute in Hilfetexten)
@@ -66,14 +67,17 @@ target_link_libraries(PsyForge
 # Offline-Test ohne DAW: rendert alle Presets als WAV und prüft die Analyse
 option(PSYFORGE_BUILD_TEST "Build offline render/analysis test" OFF)
 if(PSYFORGE_BUILD_TEST)
-    add_executable(psyforge_test Tools/RenderTest.cpp)
+    juce_add_console_app(psyforge_test PRODUCT_NAME "psyforge_test")
+    target_sources(psyforge_test PRIVATE Tools/RenderTest.cpp Source/Patterns.cpp)
     target_include_directories(psyforge_test PRIVATE Source)
+    target_compile_definitions(psyforge_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(psyforge_test PRIVATE juce::juce_audio_basics juce::juce_recommended_config_flags)
 endif()
 
 # Integrationstest mit JUCE (Prozessor, Export, Analyse, Bildschirmfotos der Oberfläche)
 if(PSYFORGE_BUILD_TEST)
     juce_add_gui_app(PsyForgeUiTest PRODUCT_NAME "PsyForgeUiTest")
-    target_sources(PsyForgeUiTest PRIVATE Tools/UiTest.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+    target_sources(PsyForgeUiTest PRIVATE Tools/UiTest.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Patterns.cpp)
     target_include_directories(PsyForgeUiTest PRIVATE Source)
     target_compile_definitions(PsyForgeUiTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1
         JucePlugin_Name="PsyForge" JucePlugin_IsSynth=1 JucePlugin_WantsMidiInput=1 JucePlugin_ProducesMidiOutput=0 JucePlugin_IsMidiEffect=0)

@@ -1,9 +1,12 @@
 // PsyForge – Offline-Test ohne DAW/JUCE
-//   psyforge_test render <outdir>     rendert alle Werks-Presets (Kick, Bass, Loop) als WAV
-//   psyforge_test roundtrip           rendert Presets, analysiert sie wieder und meldet die Übereinstimmung
-//   psyforge_test analyze <file.wav>  analysiert eine Datei und gibt die gefundenen Werte aus
+//   psyforge_test render <outdir>            rendert alle Werks-Presets aller Instrumente als WAV
+//   psyforge_test roundtrip [inst]           Preset verändern -> rendern -> analysieren -> Übereinstimmung
+//   psyforge_test analyze <inst> <file.wav>  analysiert eine Datei für ein Instrument (0 = Kick … 9 = Riser)
+//   psyforge_test patterns                   prüft alle Patterns (Loop-Grenzen) und Noten pro Instrument
 #include "../Source/Presets.h"
 #include "../Source/Analysis.h"
+#include "../Source/Patterns.h"
+#include <random>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -63,13 +66,12 @@ static bool readWav (const std::string& path, std::vector<float>& out, int& sr)
     return false;
 }
 
-static void printDiff (const SynthParams& a, const SynthParams& b, const char* prefix)
+static void printDiff (const SynthParams& a, const SynthParams& b, int inst)
 {
     for (auto& d : paramTable())
     {
-        if (std::strncmp (d.id, prefix, 2) != 0 || d.kind != KFloat) continue;
-        const float va = a.*(d.field), vb = b.*(d.field);
-        std::printf ("    %-10s soll %9.3f  ist %9.3f\n", d.id, va, vb);
+        if (! belongsTo (d.id, inst) || d.kind != KFloat) continue;
+        std::printf ("    %-10s soll %9.3f  ist %9.3f\n", d.id, a.*(d.field), b.*(d.field));
     }
 }
 
@@ -85,70 +87,86 @@ int main (int argc, char** argv)
         for (auto& fp : factoryPresets())
         {
             SynthParams p = applyPreset (fp, cur);
-            std::string base = dir + "/" + fp.name;
+            std::string base = dir + "/" + instrumentName (fp.inst) + "_" + fp.name;
             for (auto& c : base) if (c == ' ') c = '_';
-            auto k = renderKick (p, sr, p.bpm);
-            auto b = renderBass (p, sr, p.bpm, (int) p.note);
-            auto l = renderLoop (p, sr, p.bpm, 8, (int) p.note, (int) p.pattern);
-            writeWav (base + "_kick.wav", k.audio, (int) sr);
-            writeWav (base + "_bass.wav", b.audio, (int) sr);
-            writeWav (base + "_loop.wav", l.audio, (int) sr);
-            float pk = 0, pb = 0, pl = 0;
-            for (float s : k.audio) pk = std::max (pk, std::abs (s));
-            for (float s : b.audio) pb = std::max (pb, std::abs (s));
-            for (float s : l.audio) pl = std::max (pl, std::abs (s));
-            std::printf ("%-20s kick peak %.2f (%.0f ms)  bass peak %.2f  loop peak %.2f  end %.1f Hz\n",
-                         fp.name, pk, k.audio.size() * 1000.0 / sr, pb, pl, kickEndHz (p));
+            auto r = renderInstrument (p, fp.inst, sr, 145.0);
+            writeWav (base + ".wav", r.audio, (int) sr);
+            float pk = 0; for (float s : r.audio) pk = std::max (pk, std::abs (s));
+            std::printf ("%-11s %-20s peak %.2f  %5.0f ms\n", instrumentName (fp.inst), fp.name, pk, r.audio.size() * 1000.0 / sr);
         }
         return 0;
+    }
+
+    if (mode == "patterns")
+    {
+        int bad = 0;
+        for (int st = 0; st < NumStyles; ++st)
+            for (int sec = 0; sec < NumSections; ++sec)
+                for (int br = 0; br < NumBassRhythms; ++br)
+                    for (int v : { 0, 3, 7 })
+                    {
+                        const auto pat = makePattern (st, sec, br, v);
+                        const auto err = checkLoop (pat);
+                        if (err.isNotEmpty()) { ++bad; std::printf ("FEHLER Stil %d Section %d: %s\n", st, sec, err.toRawUTF8()); }
+                    }
+        const auto pat = makePattern (2, Drop, 0, 0);
+        int counts[NumInstruments] {};
+        for (auto& e : pat.events) counts[e.voice]++;
+        std::printf ("Full-On Drop: ");
+        for (int i = 0; i < NumInstruments; ++i) std::printf ("%s %d  ", instrumentName (i), counts[i]);
+        const auto mf = toMidiFile (pat, 6, 145.0, -1);
+        std::printf ("\nMIDI alle Instrumente: %d Spuren\n%s\n", mf.getNumTracks(), bad == 0 ? "Alle Patterns ok" : "FEHLER");
+        return bad;
     }
 
     if (mode == "roundtrip")
     {
-        SynthParams cur = defaultParams();
         const int only = argc > 2 ? std::atoi (argv[2]) : -1;
-        int idx = 0;
-        for (auto& fp : factoryPresets())
+        const int budget = argc > 3 ? std::atoi (argv[3]) : 6000;
+        SynthParams cur = defaultParams();
+        std::mt19937 rng (42); std::normal_distribution<float> nd (0, 1);
+        for (int inst = 0; inst < NumInstruments; ++inst)
         {
-            const int my = idx++;
-            if (only >= 0 && my != only) continue;
-            const SynthParams truth = applyPreset (fp, cur);
-            for (int kind = 0; kind < 2; ++kind)
-            {
-                RenderOut ro = kind == 0 ? renderKick (truth, sr, truth.bpm) : renderBass (truth, sr, truth.bpm, (int) truth.note);
-                Reference ref = makeReference (ro.audio, sr);
-                const auto t0 = std::chrono::steady_clock::now();
-                AnalysisJob job;
-                job.forceType = kind == 0 ? SoundKick : SoundBass;
-                AnalysisResult res = analyzeAndFit (ref, defaultParams(), job);
-                const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
-                std::printf ("%-20s %s  erkannt %-4s  grob %5.1f%%  fein %5.1f%%  (%.1f s, %d Renders)\n",
-                             fp.name, kind == 0 ? "KICK" : "BASS", res.type == SoundKick ? "Kick" : "Bass",
-                             res.initialMatch, res.match, secs, res.evaluations);
-                if (only >= 0) printDiff (truth, res.params, kind == 0 ? "k_" : "b_");
-            }
+            if (only >= 0 && inst != only) continue;
+            const FactoryPreset* target = nullptr; int k = 0;
+            for (auto& fp : factoryPresets()) if (fp.inst == inst && k++ == 2) { target = &fp; break; }
+            SynthParams t = applyPreset (*target, cur); t.inst = (float) inst;
+            if (inst >= 2)   // Drums: Ziel zufällig verändern, damit es kein Werks-Preset ist
+                for (auto& d : paramTable())
+                    if (belongsTo (d.id, inst) && d.kind == KFloat && ! std::strstr (d.id, "_level") && ! std::strstr (d.id, "_vel"))
+                        t.*(d.field) = fromNorm (d, toNorm (d, t.*(d.field)) + nd (rng) * 0.12f);
+            auto ro = inst == InKick ? renderKick (t, sr, 145.0) : inst == InBass ? renderBass (t, sr, 145.0, (int) t.note) : renderInstrument (t, inst, sr, 145.0);
+            Reference ref = makeReference (ro.audio, sr);
+            const auto t0 = std::chrono::steady_clock::now();
+            AnalysisJob job; job.budget = budget;
+            AnalysisResult res = analyzeInstrument (ref, defaultParams(), inst, job);
+            const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+            std::printf ("%-11s (%-18s) grob %5.1f%%  fein %5.1f%%  (%.1f s, %d Renders)\n", instrumentName (inst), target->name,
+                         res.initialMatch, res.match, secs, res.evaluations);
+            std::fflush (stdout);
+            if (only >= 0) printDiff (t, res.params, inst);
         }
         return 0;
     }
 
-    if (mode == "analyze" && argc > 2)
+    if (mode == "analyze" && argc > 3)
     {
+        const int inst = std::atoi (argv[2]);
         std::vector<float> x; int fsr = 44100;
-        if (! readWav (argv[2], x, fsr)) { std::printf ("Kann %s nicht lesen\n", argv[2]); return 1; }
+        if (! readWav (argv[3], x, fsr)) { std::printf ("Kann %s nicht lesen\n", argv[3]); return 1; }
         Reference ref = makeReference (x, fsr);
         AnalysisJob job;
-        AnalysisResult res = analyzeAndFit (ref, defaultParams(), job);
-        std::printf ("Typ: %s  grob %.1f%%  fein %.1f%%\n%s\n", res.type == SoundKick ? "Kick" : "Bass",
-                     res.initialMatch, res.match, res.summary.c_str());
-        printDiff (defaultParams(), res.params, res.type == SoundKick ? "k_" : "b_");
-        if (argc > 3)
+        AnalysisResult res = analyzeInstrument (ref, defaultParams(), inst, job);
+        std::printf ("%s  grob %.1f%%  fein %.1f%%\n%s\n", instrumentName (inst), res.initialMatch, res.match, res.summary.c_str());
+        printDiff (defaultParams(), res.params, inst);
+        if (argc > 4)
         {
-            auto r = res.type == SoundKick ? renderKick (res.params, fsr, 145.0)
-                                           : renderBassHz (res.params, fsr, res.bassHz, res.gateSec, (float) ref.x.size() / fsr + 0.01f);
-            writeWav (argv[3], r.audio, fsr);
+            auto r = inst == InBass ? renderBassHz (res.params, fsr, res.bassHz, res.gateSec, (float) ref.x.size() / fsr + 0.01f)
+                                    : renderInstrument (res.params, inst, fsr, 145.0);
+            writeWav (argv[4], r.audio, fsr);
         }
         return 0;
     }
-    std::printf ("Aufruf: psyforge_test render <dir> | roundtrip [index] | analyze <wav> [out.wav]\n");
+    std::printf ("Aufruf: psyforge_test render <dir> | roundtrip [inst] [budget] | analyze <inst> <wav> [out.wav] | patterns\n");
     return 1;
 }

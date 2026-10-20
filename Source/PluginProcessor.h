@@ -5,10 +5,12 @@
 #include <memory>
 #include <thread>
 #include <mutex>
-#include "Engine.h"
+#include "Synth.h"
 #include "ParamTable.h"
 #include "Presets.h"
 #include "Analysis.h"
+#include "Patterns.h"
+#include "Clip.h"
 
 // Importiertes One-Shot (für Anzeige, Vorhören und Analyse)
 struct ReferenceSound
@@ -16,10 +18,38 @@ struct ReferenceSound
     juce::String name;
     std::vector<float> samples;   // mono, normalisiert, führende Stille entfernt
     double sampleRate = 44100.0;
-    int type = 0;                 // 0 = Kick, 1 = Bass (erkannt bzw. aus der Analyse)
+    int inst = 0;                 // Instrument, für das es geladen wurde
 };
 
-class PsyForgeProcessor : public juce::AudioProcessor
+// Abspielbare Noten (aus Pattern oder MIDI-Clip) für das Instrument dieser Instanz
+struct SeqEvent { double beat = 0, len = 0.25; int note = 60; float vel = 1.0f; };
+struct SeqData
+{
+    std::vector<SeqEvent> events;   // nach beat sortiert, innerhalb [0, loopBeats)
+    double loopBeats = 16.0;
+    int inst = 0;
+    bool fromClip = false;
+};
+
+// Verbindung zwischen PsyForge-Instanzen im selben Projekt: Kick-Instanzen melden ihre Anschläge,
+// Bass-Instanzen lesen sie fürs Ducking.
+struct KickLink
+{
+    static constexpr int N = 32;
+    std::array<std::atomic<double>, N> ppq {}, ms {};
+    std::atomic<uint32_t> written { 0 };
+    std::atomic<double> lastMs { -1.0e12 };
+    void publish (double ppqPos, double wallMs)
+    {
+        const uint32_t i = written.load() % N;
+        ppq[i].store (ppqPos); ms[i].store (wallMs);
+        written.fetch_add (1);
+        lastMs.store (wallMs);
+    }
+    static KickLink& get() { static KickLink k; return k; }
+};
+
+class PsyForgeProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     PsyForgeProcessor();
@@ -53,37 +83,52 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     pf::SynthParams readParams() const;                       // aktuelle Werte (jeder Thread)
+    float getParam (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
+    int instrument() const { return juce::jlimit (0, pf::NumInstruments - 1, (int) getParam ("g_inst")); }
     void setParam (const juce::String& id, float value);      // Message-Thread, meldet an den Host
     void applyParams (const pf::SynthParams&, const char* prefix = nullptr, bool includeSession = false);
 
     double getPreviewBpm() const;                             // Host-Tempo wenn bekannt, sonst Vorschau-BPM
     double getPreviewSampleRate() const { return currentSampleRate > 0 ? currentSampleRate : 44100.0; }
+    bool isHostPlaying() const { return hostPlaying.load(); }
 
-    // Presets
-    int getPresetIndex() const { return presetIndex; }
-    juce::String getPresetName() const { return presetName; }
-    void loadFactoryPreset (int index);
+    // Presets (pro Instrument)
+    juce::String getPresetName() const { return presetName[(size_t) instrument()]; }
+    void loadFactoryPreset (const pf::FactoryPreset&);
     static juce::File presetDirectory();
-    juce::Array<juce::File> listUserPresets() const;
+    juce::Array<juce::File> listUserPresets() const;        // nur für das aktuelle Instrument
     bool saveUserPreset (const juce::String& name);
     bool loadUserPreset (const juce::File&);
 
     // Vorhören
-    void auditionKick()  { padKick.store (true); }
-    void auditionBass()  { padBass.store (true); }
+    void audition() { padHit.store (true); }
     void auditionReference() { refPlayPos.store (0.0); refPlaying.store (true); }
-    std::atomic<bool> loopOn { false };
+    std::atomic<bool> previewOn { false };      // Pattern/Clip vorhören (ohne DAW-Play)
+
+    // Sequenz (Pattern oder Clip) für Anzeige
+    std::shared_ptr<const SeqData> getSequence() const;
+    std::atomic<double> uiBeat { -1.0 };        // aktuelle Position in der Sequenz (Beats), -1 = steht
+
+    // MIDI-Clip
+    bool loadClip (const juce::File&, juce::String& error);
+    void clearClip();
+    std::shared_ptr<const pf::MidiClip> getClip() const { return clip; }
+    int getClipFilter() const { return clipFilter; }
+    void setClipFilter (int f) { clipFilter = f; seqDirty = true; }
 
     // Export
-    enum ExportWhat { ExportKick = 0, ExportBass, ExportLoop };
-    juce::File renderToFile (int what, const juce::File& target = {});
-    juce::String suggestedFileName (int what) const;
+    enum WavWhat { WavHit = 0, WavLoop };
+    juce::File renderWav (int what, const juce::File& target = {});
+    juce::String suggestedWavName (int what) const;
+    enum MidiWhat { MidiSection = 0, MidiFullTrack, MidiAllSection, MidiAllFullTrack, MidiAllSections, MidiClipOut };
+    juce::File writeMidi (int what);            // schreibt in den Temp-Ordner (für Drag & Drop)
+    bool exportAllSections (const juce::File& folder);
 
     // Referenz + Analyse
     bool loadReference (const juce::File&, juce::String& error);
     std::shared_ptr<const ReferenceSound> getReference() const;
     void clearReference();
-    void startAnalysis (int forceType, bool fine);
+    void startAnalysis (bool fine);
     void cancelAnalysis();
     bool isAnalysing() const { return analysing.load(); }
     float getAnalysisProgress() const { return analysisProgress.load(); }
@@ -95,29 +140,51 @@ public:
     bool canUndoAnalysis() const { return hasUndo; }
     void undoAnalysis();
 
-    // Fenstergröße
     int getUiWidth() const { return uiWidth; }
     void setUiWidth (int w) { uiWidth = w; }
 
-    // für die Anzeige
-    std::atomic<float> uiKickLevel { 0.0f }, uiBassLevel { 0.0f }, uiOutLevel { 0.0f };
+    std::atomic<float> uiLevel { 0.0f }, uiDuck { 0.0f };
     std::atomic<int> uiParamVersion { 0 };
+    std::atomic<int> uiHits { 0 };
 
 private:
     static BusesProperties makeBuses();
-    void handleMidi (const juce::MidiMessage&, const pf::SynthParams&);
-    void runLoop (double ppqStart, double ppqEnd, int numSamples, double bpm, int pattern, int note, std::vector<std::pair<int, int>>& events);
+    void timerCallback() override;
+    void rebuildSequence();
+    std::shared_ptr<SeqData> buildSequence (const pf::SynthParams&, double bpm) const;
+    pf::Pattern currentPattern (const pf::SynthParams&, bool fullTrack) const;
+    pf::Groove currentGroove (const pf::SynthParams&, double bpm) const;
+    void triggerNote (int note, float vel, int gate, int sampleIndex, double blockPpq, double blockMs, double spb);
 
-    pf::Engine engine;
+    pf::Synth synth;
     std::vector<std::atomic<float>*> raw;    // parallel zu pf::paramTable()
 
     double currentSampleRate = 0.0;
     std::atomic<double> hostBpm { 0.0 };
+    std::atomic<bool> hostPlaying { false };
     double freeBeat = 0.0;
-    std::vector<std::pair<int, int>> loopEvents;   // Ereignisse der Vorschau-Schleife (vorab reserviert)
-    int loopBassNote = -1;
-    int padBassOffLeft = 0;
-    std::atomic<bool> padKick { false }, padBass { false };
+    bool wasPlayingSeq = false;
+    std::atomic<bool> padHit { false };
+
+    // Sequenz
+    std::shared_ptr<const SeqData> sequence;
+    mutable juce::SpinLock seqLock;
+    std::vector<std::shared_ptr<const SeqData>> retired;
+    std::atomic<bool> seqDirty { true };
+    pf::SynthParams lastSeqParams;
+    double lastSeqBpm = 0.0;
+    struct BlockEv { int pos; int note; float vel; int gate; };
+    std::vector<BlockEv> blockEvents;
+
+    // MIDI-Clip
+    std::shared_ptr<const pf::MidiClip> clip;
+    int clipFilter = pf::ClipAuto;
+
+    // Ducking
+    uint32_t linkRead = 0;
+    struct DuckEv { int pos; int ago; };
+    std::vector<DuckEv> duckEvents;
+    float scEnv = 0.0f; bool scArmed = true;
 
     // Referenz-Wiedergabe
     std::shared_ptr<const ReferenceSound> reference;
@@ -135,8 +202,7 @@ private:
     pf::SynthParams undoParams;
     bool hasUndo = false;
 
-    int presetIndex = 0;
-    juce::String presetName { "Init" };
+    std::array<juce::String, pf::NumInstruments> presetName;
     int uiWidth = 1180;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PsyForgeProcessor)

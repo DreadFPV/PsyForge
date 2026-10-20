@@ -3,12 +3,14 @@
 // danach Feinanpassung (Pattern-Search) bis der gerenderte Klang dem Original sehr nahe kommt.
 // Ohne JUCE, läuft in einem Hintergrund-Thread.
 #include "Presets.h"
+#include "Synth.h"
 #include <complex>
 #include <functional>
 #include <atomic>
 #include <random>
 #include <string>
 #include <cstdio>
+#include <chrono>
 
 namespace pf
 {
@@ -32,7 +34,7 @@ inline Reference makeReference (const std::vector<float>& in, double sr)
     while (end > start && std::abs (in[end - 1]) < peak * 0.0005f) --end;   // -66 dB
     // ein paar Samples vor dem Einsatz behalten, aber auf Nulldurchgang achten
     start = start > 4 ? start - 4 : 0;
-    const size_t maxLen = (size_t) (sr * 2.0);
+    const size_t maxLen = (size_t) (sr * 8.0);
     end = std::min (end, start + maxLen);
     r.x.assign (in.begin() + (long) start, in.begin() + (long) end);
     for (auto& s : r.x) s /= peak;
@@ -40,30 +42,37 @@ inline Reference makeReference (const std::vector<float>& in, double sr)
 }
 
 //==============================================================================
-inline void fft (std::vector<std::complex<float>>& a)
+// In-place-FFT (radix 2). Rechnet Real-/Imaginärteil von Hand: std::complex-Multiplikation ist ohne
+// -ffast-math sehr langsam (NaN-Prüfungen), das macht hier den grössten Teil der Analysezeit aus.
+inline void fft (std::vector<std::complex<float>>& data)
 {
-    const size_t n = a.size();
+    const size_t n = data.size();
+    float* a = reinterpret_cast<float*> (data.data());
     for (size_t i = 1, j = 0; i < n; ++i)
     {
         size_t bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
-        if (i < j) std::swap (a[i], a[j]);
+        if (i < j) { std::swap (a[2 * i], a[2 * j]); std::swap (a[2 * i + 1], a[2 * j + 1]); }
     }
     for (size_t len = 2; len <= n; len <<= 1)
     {
-        const float ang = -kTwoPi / (float) len;
-        const std::complex<float> wl (std::cos (ang), std::sin (ang));
+        const double ang = -2.0 * 3.14159265358979323846 / (double) len;
+        const size_t half = len / 2;
+        // Drehfaktoren dieser Stufe einmal berechnen
+        thread_local std::vector<float> tw;
+        tw.resize (half * 2);
+        for (size_t j = 0; j < half; ++j) { tw[2 * j] = (float) std::cos (ang * (double) j); tw[2 * j + 1] = (float) std::sin (ang * (double) j); }
         for (size_t i = 0; i < n; i += len)
-        {
-            std::complex<float> w (1.0f, 0.0f);
-            for (size_t j = 0; j < len / 2; ++j)
+            for (size_t j = 0; j < half; ++j)
             {
-                const auto u = a[i + j], v = a[i + j + len / 2] * w;
-                a[i + j] = u + v; a[i + j + len / 2] = u - v;
-                w *= wl;
+                float* u = a + 2 * (i + j);
+                float* v = a + 2 * (i + j + half);
+                const float wr = tw[2 * j], wi = tw[2 * j + 1];
+                const float vr = v[0] * wr - v[1] * wi, vi = v[0] * wi + v[1] * wr;
+                v[0] = u[0] - vr; v[1] = u[1] - vi;
+                u[0] += vr; u[1] += vi;
             }
-        }
     }
 }
 
@@ -90,10 +99,10 @@ struct FeatureSetup
     {
         sr = sampleRate;
         const int frameLen = std::max (1, (int) std::lround (sr * 0.001));
-        frames = std::min (2000, (lengthSamples + frameLen - 1) / frameLen);
+        frames = std::min (8000, (lengthSamples + frameLen - 1) / frameLen);
         fftSize = sr > 60000.0 ? 2048 : 1024;
-        hop = fftSize / 4;
-        specFrames = std::min (120, (lengthSamples + hop - 1) / hop + 1);
+        hop = std::max (fftSize / 4, lengthSamples / 120);
+        specFrames = std::min (121, (lengthSamples + hop - 1) / hop + 1);
         headLen = std::min (lengthSamples, (int) (sr * 0.03));
         window.resize ((size_t) fftSize);
         for (int i = 0; i < fftSize; ++i) window[(size_t) i] = 0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) fftSize);
@@ -119,9 +128,21 @@ inline Features computeFeatures (const float* x, int n, const FeatureSetup& fs, 
     f.env.assign ((size_t) fs.frames, -80.0f);
     float peak = 1.0e-9f;
     for (int i = 0; i < n; ++i) peak = std::max (peak, std::abs (x[i]));
-    // Hüllkurve über das analytische Signal (Hilbert) – unabhängig von der Phase der Schwingung
+    // Hüllkurve über das analytische Signal (Hilbert) – unabhängig von der Phase der Schwingung.
+    // Lange Klänge (> 0,6 s: Open Hat, Ride, Riser) über RMS je Millisekunde (viel schneller, dort genau genug).
     std::vector<float> rms ((size_t) fs.frames, 0.0f);
     float maxRms = 1.0e-9f;
+    if (n > (int) (sr * 0.6))
+    {
+        for (int fr = 0; fr < fs.frames; ++fr)
+        {
+            double acc = 0; int cnt = 0;
+            for (int i = std::max (0, fr * frameLen - frameLen); i < (fr + 2) * frameLen && i < n; ++i) { acc += (double) x[i] * x[i]; ++cnt; }
+            rms[(size_t) fr] = cnt > 0 ? (float) std::sqrt (acc / cnt * 2.0) : 0.0f;
+            maxRms = std::max (maxRms, rms[(size_t) fr]);
+        }
+    }
+    else
     {
         size_t N = 1; while (N < (size_t) n + 2048) N <<= 1;
         std::vector<std::complex<float>> a (N, { 0.0f, 0.0f });
@@ -516,6 +537,7 @@ struct AnalysisJob
     std::function<void (float progress, float match)> progress;
     int budget = 6000;           // max. Renders
     bool fine = true;            // Feinanpassung aktiv
+    double maxSeconds = 45.0;    // Zeitlimit der Feinanpassung (lange Klänge wie Ride/Riser)
     std::function<void (const char* stage, const SynthParams&, float gate)> stageHook;   // nur für Tests
 };
 
@@ -529,6 +551,7 @@ struct AnalysisResult
     float bassHz = 0, gateSec = 0;
     int detectedNote = -1; float detectedCents = 0;
     float kickEnd = 0, measuredHz = 0;
+    int inst = InKick;
     std::string summary;
 };
 
@@ -1351,5 +1374,222 @@ inline AnalysisResult analyzeAndFit (const Reference& ref, const SynthParams& ba
     res.ok = true;
     if (job.progress) job.progress (1.0f, res.match);
     return res;
+}
+//==============================================================================
+// Analyse für Snare, Clap, Hats, Ride, Perc, Zap, Riser: Hüllkurve + Spektrum (+ Tonhöhe bei tonalen Klängen)
+namespace detail
+{
+inline float decayToDb (const std::vector<float>& envDb, float db, int from = 0)
+{
+    int pk = from; float mx = -200.0f;
+    for (int i = from; i < (int) envDb.size(); ++i) if (envDb[(size_t) i] > mx) { mx = envDb[(size_t) i]; pk = i; }
+    int i = pk;
+    while (i < (int) envDb.size() - 1 && envDb[(size_t) i] > mx + db) ++i;
+    return (float) (i - pk);   // ms
+}
+
+inline float spectralCentroid (const std::vector<float>& x, double sr, int from, int len)
+{
+    int N = 1; while (N < len) N <<= 1;
+    N = std::max (N, 2048);
+    std::vector<std::complex<float>> buf ((size_t) N, { 0.0f, 0.0f });
+    for (int i = 0; i < len && from + i < (int) x.size(); ++i)
+    {
+        const float w = 0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) len);
+        buf[(size_t) i] = { x[(size_t) (from + i)] * w, 0.0f };
+    }
+    fft (buf);
+    double num = 0, den = 0;
+    for (int k = 1; k < N / 2; ++k) { const double e = std::norm (buf[(size_t) k]); num += e * k * sr / N; den += e; }
+    return den > 0 ? (float) (num / den) : 1000.0f;
+}
+
+inline void setIf (SynthParams& p, const char* id, float v)
+{
+    if (auto* d = findParam (id)) p.*(d->field) = std::clamp (v, d->min, d->max);
+}
+
+// Grobe Schätzung aus Messwerten
+inline void guessDrum (const Reference& r, int inst, SynthParams& p)
+{
+    FeatureSetup fs; fs.init (r.sr, (int) r.x.size());
+    const Features f = computeFeatures (r.x.data(), (int) r.x.size(), fs, true);
+    const float dec = decayToDb (f.env, -20.0f);
+    const float lenMs = (float) (r.x.size() * 1000.0 / r.sr);
+    const int n = (int) r.x.size();
+    const float cent = spectralCentroid (r.x, r.sr, 0, std::min (n, (int) (r.sr * 0.08)));
+    switch (inst)
+    {
+        case InSnare:
+            setIf (p, "s_ndec", dec * 1.1f); setIf (p, "s_bdec", dec * 0.5f);
+            setIf (p, "s_nbp", cent * 1.2f);
+            {
+                const float f0 = yinPitch (r.x, r.sr, (int) (r.sr * 0.004), std::min (n, (int) (r.sr * 0.05)));
+                if (f0 > 90 && f0 < 500) setIf (p, "s_tone1", f0);
+            }
+            break;
+        case InClap:
+            setIf (p, "c_tdec", dec); setIf (p, "c_bp", cent * 0.6f);
+            break;
+        case InCHat: setIf (p, "h_dec", dec); setIf (p, "h_bp", cent); setIf (p, "h_hp", cent * 0.7f); break;
+        case InOHat: setIf (p, "o_dec", dec); setIf (p, "o_bp", cent); setIf (p, "o_hp", cent * 0.7f); break;
+        case InRide: setIf (p, "r_dec", dec); setIf (p, "r_bp", cent); setIf (p, "r_hp", cent * 0.6f); break;
+        case InPerc:
+        {
+            setIf (p, "p_dec", dec);
+            const float f0 = yinPitch (r.x, r.sr, std::min (n - 1, (int) (r.sr * 0.01)), n);
+            if (f0 > 30) setIf (p, "p_tune", f0);
+            setIf (p, "p_snap", 0);
+            break;
+        }
+        case InZap:
+        {
+            setIf (p, "z_len", lenMs);
+            std::vector<float> early, late;
+            for (int i = 1; i < std::min (f.frames, 6); ++i) if (f.pitch[(size_t) i] > 0) early.push_back (f.pitch[(size_t) i]);
+            for (int i = (int) (lenMs * 0.6f); i < (int) (lenMs * 0.9f) && i < f.frames; ++i) if (f.pitch[(size_t) i] > 0) late.push_back (f.pitch[(size_t) i]);
+            if (! early.empty()) setIf (p, "z_start", medianOf (early) * 1.3f);
+            if (! late.empty())  setIf (p, "z_end", medianOf (late) * 0.9f);
+            setIf (p, "z_sweep", lenMs * 0.6f);
+            break;
+        }
+        case InRiser:
+        {
+            int pk = 0; float mx = -200;
+            for (int i = 0; i < f.frames; ++i) if (f.env[(size_t) i] > mx) { mx = f.env[(size_t) i]; pk = i; }
+            setIf (p, "x_len", (float) pk / 1000.0f * 145.0f / 60.0f);
+            setIf (p, "x_rel", std::max (10.0f, lenMs - (float) pk));
+            break;
+        }
+        default: break;
+    }
+}
+} // namespace detail
+
+inline AnalysisResult analyzeDrumAndFit (const Reference& ref, const SynthParams& base, int inst, const AnalysisJob& job)
+{
+    AnalysisResult res;
+    res.params = base; res.inst = inst; res.type = SoundKick;
+    if (ref.x.size() < (size_t) (ref.sr * 0.005)) { res.summary = "Datei zu kurz oder still."; return res; }
+
+    const bool tonal = inst == InPerc || inst == InZap;
+    FeatureSetup fs; fs.init (ref.sr, (int) ref.x.size());
+    const Features target = computeFeatures (ref.x.data(), (int) ref.x.size(), fs, tonal);
+    LossWeights w; w.env = 1.0f; w.spec = 1.0f; w.pitch = tonal ? 2.0f : 0.0f; w.head = tonal ? 0.3f : 0.0f;
+    const float maxSec = (float) (ref.x.size() / ref.sr) * 1.5f + 0.5f;
+
+    int evals = 0;
+    float bestLoss = 1e9f;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto elapsed = [&] { return std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count(); };
+    auto cancelled = [&] { return (job.cancel != nullptr && job.cancel->load()) || elapsed() > job.maxSeconds; };
+    auto loss = [&] (const SynthParams& q) -> float
+    {
+        ++evals;
+        SynthParams r = q; r.inst = (float) inst;
+        const auto out = renderInstrument (r, inst, ref.sr, 145.0, 1.0f, -1.0f, maxSec);
+        const Reference y = makeReference (out.audio, ref.sr);
+        if (y.x.empty()) return 1e6f;
+        const Features c = computeFeatures (y.x.data(), (int) y.x.size(), fs, tonal);
+        const float L = compareFeatures (target, c, w).total;
+        if (L < bestLoss) bestLoss = L;
+        if (job.progress && evals % 20 == 0)
+            job.progress (std::min (0.99f, std::max ((float) evals / (float) job.budget, (float) (elapsed() / job.maxSeconds))), matchPercent (bestLoss));
+        return L;
+    };
+    const detail::Objective obj = [&] (const SynthParams& q, float) { return loss (q); };
+
+    // Regler dieses Instruments (ohne Level/Velocity)
+    std::vector<detail::Var> vars;
+    for (auto& d : paramTable())
+    {
+        if (! belongsTo (d.id, inst) || d.kind != KFloat) continue;
+        const std::string id = d.id;
+        if (id.find ("_level") != std::string::npos || id.find ("_vel") != std::string::npos) continue;
+        vars.push_back ({ d.field, &d });
+    }
+    std::vector<float SynthParams::*> choices;   // Auswahl-Regler (z. B. Drive-Typ) einzeln durchprobieren
+    for (auto& d : paramTable())
+        if (belongsTo (d.id, inst) && (d.kind == KChoice || d.kind == KBool) && std::string (d.id) != "p_snap" && std::string (d.id) != "s_klock")
+            choices.push_back (d.field);
+    // Tonhöhe exakt übernehmen: Einrasten auf die Tonart während der Analyse aus
+    auto unlock = [] (SynthParams& q) { q.pSnap = 0; q.sKeyLock = 0; };
+
+    // Startpunkte: eigene Schätzung + alle Werks-Presets dieses Instruments
+    struct Cand { SynthParams p; float L; };
+    std::vector<Cand> cands;
+    {
+        SynthParams g = applyPreset (FactoryPreset { "", "", {}, inst }, base);
+        unlock (g);
+        detail::guessDrum (ref, inst, g);
+        cands.push_back ({ g, loss (g) });
+        res.initialMatch = matchPercent (cands.back().L);
+        for (auto& fp : factoryPresets())
+            if (fp.inst == inst)
+            {
+                SynthParams q = applyPreset (fp, base);
+                unlock (q);
+                SynthParams q2 = q; detail::guessDrum (ref, inst, q2);
+                cands.push_back ({ q, loss (q) });
+                cands.push_back ({ q2, loss (q2) });
+            }
+    }
+    std::sort (cands.begin(), cands.end(), [] (const Cand& a, const Cand& b) { return a.L < b.L; });
+    res.initialMatch = std::max (res.initialMatch, matchPercent (cands.front().L));
+
+    SynthParams best = cands.front().p; float bestL = cands.front().L;
+    if (job.fine && ! vars.empty())
+    {
+        const int B = job.budget;
+        auto stop = [&] { return cancelled() || evals >= B; };
+        const int starts = std::min<int> (2, (int) cands.size());
+        for (int s = 0; s < starts && ! stop(); ++s)
+        {
+            SynthParams q = cands[(size_t) s].p; float g = 0.0f;
+            const int cap = evals + (int) (B * 0.35f);
+            const float L = detail::cmaSearch (q, g, vars, obj, 0.12f, cap - evals, [&] { return stop() || evals >= cap; }, 900u + (unsigned) s);
+            if (L < bestL) { bestL = L; best = q; }
+        }
+        for (auto f : choices)
+        {
+            if (stop()) break;
+            const float keep = best.*f;
+            for (int v = 0; v < 4; ++v)
+            {
+                SynthParams q = best; q.*f = (float) v;
+                bool valid = false;
+                for (auto& d : paramTable()) if (d.field == f && (float) v <= d.max) valid = true;
+                if (! valid || v == (int) std::lround (keep)) continue;
+                const float L = loss (q);
+                if (L < bestL) { bestL = L; best = q; }
+            }
+        }
+        float g = 0.0f;
+        const float L = detail::patternSearch (best, g, vars, obj, 0.03f, 0.001f, std::max (50, B - evals), stop, 77u);
+        bestL = std::min (bestL, L);
+    }
+
+    res.params = best;
+    res.match = matchPercent (bestL);
+    res.evaluations = evals;
+    char buf[256];
+    std::snprintf (buf, sizeof buf, "%s · Länge %.0f ms · %d Varianten getestet", instrumentName (inst), ref.x.size() * 1000.0 / ref.sr, evals);
+    res.summary = buf;
+    res.ok = true;
+    if (job.progress) job.progress (1.0f, res.match);
+    return res;
+}
+
+// Einstieg: passendes Verfahren für das Instrument der Instanz
+inline AnalysisResult analyzeInstrument (const Reference& ref, const SynthParams& base, int inst, AnalysisJob job)
+{
+    if (inst == InKick || inst == InBass)
+    {
+        job.forceType = inst == InKick ? SoundKick : SoundBass;
+        auto r = analyzeAndFit (ref, base, job);
+        r.inst = inst;
+        return r;
+    }
+    return analyzeDrumAndFit (ref, base, inst, job);
 }
 } // namespace pf

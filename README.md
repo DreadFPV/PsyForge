@@ -1,58 +1,80 @@
 # PsyForge
 
-VST3/AU-Instrument (Windows & Mac) für **Goa / Psytrance / Full-On Kick und Rolling-Bass** – direkte Klangerzeugung per Synthese,
-mit Waveform-Anzeige, WAV-Export und **WAV-Analyse**, die ein bestehendes One-Shot möglichst genau nachbaut.
+VST3/AU-Instrument (Windows & Mac) für **Goa / Psytrance / Full-On** – alle Drums und der Bass per Synthese,
+dazu die Song-Patterns aus Goadrums, MIDI-Drag & Drop, MIDI-Clip-Import und eine **WAV-Analyse**, die ein bestehendes
+One-Shot möglichst genau nachbaut.
 
-Von JustCreateit.ch für Just DereadBeats.
+Von JustCreateit.ch für Just DereadBeats. PsyForge ersetzt Goadrums.
 
-## Installation
+## Das Prinzip: eine Instanz pro Instrument
 
-1. Unter **Actions** (oder **Releases**) das ZIP für dein System laden: `PsyForge-Windows.zip` oder `PsyForge-macOS.zip`.
-2. `PsyForge.vst3` kopieren nach
-   - Windows: `C:\Program Files\Common Files\VST3\`
-   - Mac: `~/Library/Audio/Plug-Ins/VST3/` (AU: `PsyForge.component` nach `~/Library/Audio/Plug-Ins/Components/`)
-3. In Cubase: Studio → VST-Plug-in-Manager → neu scannen. PsyForge erscheint als Instrument.
+Jede PsyForge-Instanz spielt **ein** Instrument: Kick, Bass, Snare, Clap, Closed Hat, Open Hat, Ride, Perc, Zap oder Riser.
+Du legst in Cubase pro Instrument eine Instrumentenspur mit PsyForge an und wählst oben *Instrument dieser Spur*.
+So hat jedes Instrument seine eigene Spur, seinen eigenen Mixer-Kanal und seine eigenen MIDI-Noten.
 
-## In Cubase verwenden
+## Schnellstart in Cubase
 
-- **MIDI-Kanal 1 = Kick**, **MIDI-Kanal 2 = Bass** (oben im Plugin änderbar).
-  Die Kick reagiert auf jede Note, der Bass spielt die Notenhöhe (monophon, jede Note neu angeschlagen).
-- Dein MIDI-File (z. B. aus Goadrums oder dem MIDI-Generator) einfach auf die Instrumentenspur legen – Kick-Noten auf Kanal 1, Bass-Noten auf Kanal 2.
-- **Ausgänge:** Main (Stereo) + getrennte Ausgänge *Kick* und *Bass*. In Cubase im Instrument-Rack die Ausgänge aktivieren –
-  sobald ein Einzelausgang aktiv ist, verschwindet der Klang aus dem Main-Ausgang.
-- Das Bass-**Ducking** (Sidechain) passiert intern: jede Kick senkt den Bass kurz ab, auch bei getrennten Ausgängen.
+1. Instrumentenspur mit **PsyForge** anlegen, oben **Instrument** wählen (z. B. Kick).
+2. Rechts **Stil** und **Section** wählen und den Chip **⇩ MIDI: Section** auf die Spur ziehen.
+3. Play – PsyForge spielt **alle Noten seiner Spur** (Kanal und Tonhöhe egal; beim Bass bestimmt die Note den Ton).
+4. Für den Bass eine zweite Spur mit PsyForge → *Bass*. Das Ducking hört automatisch auf die Kick-Instanz.
+
+Alle Instrumente auf einmal: Chip **⇩ Alle Instr.: Section** (oder *Full Track*) ins Projekt ziehen. Cubase legt pro Instrument
+eine MIDI-Spur an (Kick, Bass, Snare …). Diese Spuren auf die passenden PsyForge-Instanzen leiten.
+
+Liegen mehrere Instrumente auf **einer** MIDI-Spur (z. B. eine fremde Drum-MIDI), oben **Noten: Nur Drum-Map** wählen –
+dann spielt die Instanz nur ihre GM-Note (C1 Kick, D1 Snare, D#1 Clap, F#1 Closed Hat, A#1 Open Hat, D#2 Ride, F1–D2 Perc, C#2 Zap, F#2 Riser).
 
 ## Bedienung
 
 | Bereich | Was es macht |
 |---|---|
-| **Waveform** | zeigt die erzeugte Kick, Bassnote oder den Loop. Bei der Kick: Tonhöhenverlauf (blau, Hz rechts), Hüllkurve (gestrichelt), 1/16- und 1/8-Marken im Tempo. Mit der Maus darüberfahren zeigt Zeit, Hz und dB. **In die DAW ziehen = WAV-Export.** |
-| **▶ Kick / ▶ Bass / ⟳ Loop** | Vorhören. Der Loop spielt das gewählte Muster (KBBB, Offbeat, Gallop, Triolen) – synchron zur DAW, wenn sie läuft. |
-| **Kick-WAV / Bass-WAV / Loop-WAV** | als 24-Bit-WAV speichern (Name enthält Preset, Note und BPM). |
-| **Tonart / A4 / 432** | Kick-Grundton rastet auf die Tonart ein (Snap). A4 frei einstellbar, 440/432 per Knopf. |
-| **Presets** | Full-On, Progressive, Brazilian Bounce + eigene Presets (Ordner `Dokumente/PsyForge/Presets`). |
+| **Instrument dieser Spur** | Welches Instrument die Instanz spielt. Sound, Presets, Patterns und Analyse richten sich danach. |
+| **Waveform** | Ein Anschlag mit Tonhöhe (blau, Hz rechts), Hüllkurve (gestrichelt), 1/16- und 1/8-Marken. In die DAW ziehen = WAV. |
+| **Pattern & MIDI** | Stil (8), Section (9), Bass-Rhythmus (7), Variation (12 + Zufall), Swing, Humanize. Die Notenleiste zeigt, was diese Instanz spielt. |
+| **Pattern spielen** | An: PsyForge spielt das Pattern bzw. den Clip selbst, synchron zu Cubase (zusätzlich zur Spur). |
+| **▶ Anschlag / ⟳ Vorhören** | Einen Schlag hören / Pattern im Loop hören, auch ohne Play in Cubase. |
+| **Chips** | Ziehen = in Cubase ablegen, Klicken = speichern unter. MIDI: Section, Full Track, alle Instrumente; WAV: Anschlag, Loop. |
+| **Alle Sections …** | Alle 9 Sections dieses Instruments als einzelne MIDI-Dateien in einen Ordner. |
+| **Tonart / A4 / 432** | Kick-Snap, Bass-Notch, Perc- und Snare-Key-Lock folgen der Tonart. A4 frei, 440/432 per Knopf. |
+| **Presets** | Werks-Presets pro Instrument (Full-On, Progressive, Brazilian Bounce, Goa, Dark/Hi-Tech) + eigene (`Dokumente/PsyForge/Presets/<Instrument>`). |
 
-### Kick
-- **Pitch:** Start (Click-Spitze) → Punch → Grundton, jeweils frei in Hz einstellbar; Click-Zeit und Sweep bestimmen, wie schnell gefallen wird. Drift senkt den Grundton über die Länge.
-- **Lautstärke / Fishtail:** Attack, Hold, Decay, Länge (oder Sync auf 1/16, 1/8 …), Fishtail = typische Einschnürung nach dem Anschlag.
-- **Click:** Rausch- oder Ton-Click mit eigener Frequenz und Länge. **Drive:** Tanh, Hart, Fold, Röhre, Transient-Schutz. **EQ:** Low-Cut, „200-Hz-Loch“ (Frequenz/Tiefe/Q frei), High-Cut.
+### Tabs
+- **SOUND** – alle Regler des gewählten Instruments (Experten-Ansicht).
+- **MIDI-CLIP** – eine MIDI-Datei hineinziehen (z. B. aus dem MIDI-Generator oder Midizer). *Noten* wählt, was die Instanz davon spielt:
+  automatisch (Spurname oder Drum-Map), alle Noten, eine Spur oder eine Note. Mit *Quelle = MIDI-Clip* spielen „Pattern spielen“
+  und „Vorhören“ den Clip im Loop. Der Chip exportiert die gefilterten Noten auf der richtigen Note. Der Clip wird im Projekt gespeichert.
+- **ANALYSE** – ein One-Shot des Instruments laden, *Analysieren + Feinanpassung* (10–45 s), *Übernehmen*. Original orange in der Waveform,
+  *▶ Original* zum Vergleichen.
 
-### Bass
-- Saw + Square (+ Unison) + Sinus-Sub (0/-1 Oktave, 0°/180°), Phasen-Reset pro Note.
-- ADSR, 12/24-dB-Tiefpass mit Filter-Hüllkurve (der „Plock“), Keytrack, **Pluck** (Pitch-Sprung, Brazilian-Bounce), Drive,
-  Ducking, Versatz (Phasen-Ausrichtung zur Kick), EQ mit **Kick-Notch** auf dem Kick-Grundton.
+### Bass-Ducking (Duck-Quelle)
+- **Kick-Instanz** (Standard): Jede PsyForge-Kick im selben Projekt meldet ihre Schläge, der Bass duckt darauf. Läuft keine Kick-Instanz, duckt er auf jeder Zählzeit.
+- **Viertel-Raster**: auf jeder Zählzeit.
+- **Sidechain**: Audio am Sidechain-Eingang (in Cubase am Instrument aktivieren).
 
-## WAV-Analyse (ANALYSE-Seite)
+## Instrumente
 
-1. One-Shot laden oder einfach aufs Plugin ziehen (WAV, AIFF, FLAC) – **eine** Kick oder **eine** Bassnote, ohne Hall.
-2. *Analysieren + Feinanpassung* (10–30 s): erkennt Kick oder Bass, misst Tonhöhenverlauf, Hüllkurve, Click, Sättigung und Spektrum,
-   schätzt die Regler und passt sie danach automatisch an, bis der Klang möglichst nah dran ist. Die Übereinstimmung wird in % angezeigt.
-3. **Übernehmen** lädt das Ergebnis in Kick bzw. Bass (Rückgängig möglich). Das Original liegt orange in der Waveform zum Vergleich, *▶ Original* spielt es ab.
+| Instrument | Klangerzeugung |
+|---|---|
+| Kick | Sinus mit 3-stufigem Pitch-Sweep (Start → Punch → Grundton), Fishtail-Hüllkurve, Click, Knock, Drive, EQ mit 200-Hz-Loch, 1/8-Sync |
+| Bass | Saw/Square/Unison + Sub, 12/24-dB-Filter mit Hüllkurve, Pluck, Drive, Ducking, Kick-Notch |
+| Snare | 2 Töne mit Pitch-Fall + Rauschteppich (HP/BP) + Snap, Drive, EQ, Key-Lock |
+| Clap | 1–8 Schläge mit Abstand/Streuung + Hall-Ausklang, Bandpass, Drive |
+| Closed/Open Hat, Ride | 6 Metall-Oszillatoren + Rauschen, Bandpass/Hochpass, Glocke (Ride-Bell), Drive |
+| Perc | Sinus→Dreieck→Rechteck, FM, Pitch-Hüllkurve, Filter, Note A1 = Grundton, Snap auf die Tonart |
+| Zap | Pitch-Sweep mit Kurve, Filter folgt der Tonhöhe, Resonanz |
+| Riser | Rausch-Sweep + steigender Ton, Länge = Notenlänge (bzw. Regler bei Live-MIDI) |
 
-Hinweise:
-- Kick-Grundton wird exakt übernommen (Snap aus). Für deine Tonart Snap wieder einschalten.
-- Bässe werden auf die nächste Note in deiner Stimmung gesetzt – bei 432-Hz-Samples vorher A4 auf 432 stellen.
-- Kicks werden sehr genau getroffen; bei Bässen aus anderen Synths (andere Filter, Layer, Effekte) ist das Ergebnis ein guter Startpunkt zum Nachregeln.
+## Installation
+
+1. Unter **Actions** (letzter Build → Artifacts) oder **Releases** das ZIP laden: `PsyForge-Windows.zip` oder `PsyForge-macOS.zip`.
+2. `PsyForge.vst3` kopieren nach
+   - Windows: `C:\Program Files\Common Files\VST3\`
+   - Mac: `~/Library/Audio/Plug-Ins/VST3/` (AU: `PsyForge.component` nach `~/Library/Audio/Plug-Ins/Components/`)
+   - Mac einmalig freigeben: `xattr -cr ~/Library/Audio/Plug-Ins/VST3/PsyForge.vst3`
+3. In Cubase: Studio → VST-Plug-in-Manager → neu scannen.
+
+Hinweis: Projekte mit PsyForge 0.1 laden, aber Kick und Bass liegen jetzt in getrennten Instanzen.
 
 ## Selbst bauen
 
@@ -60,23 +82,27 @@ Hinweise:
 cmake -B build                        # JUCE 8.0.4 wird automatisch geladen (oder ./JUCE)
 cmake --build build --config Release
 ```
-GitHub Actions baut bei jedem Push für Windows und macOS; ein Tag `v*` erzeugt ein Release.
 
-Tests ohne DAW (Linux/Mac):
+Tests ohne DAW:
 ```bash
 cmake -B build -DPSYFORGE_BUILD_TEST=ON && cmake --build build --target psyforge_test PsyForgeUiTest
-./build/psyforge_test render out/          # alle Presets als WAV
-./build/psyforge_test roundtrip            # Preset rendern -> analysieren -> Übereinstimmung
-./build/psyforge_test analyze kick.wav     # eigene Datei analysieren
+./build/psyforge_test_artefacts/Release/psyforge_test render out/        # alle Presets als WAV
+./build/psyforge_test_artefacts/Release/psyforge_test patterns           # Loop-Grenzen aller Patterns
+./build/psyforge_test_artefacts/Release/psyforge_test roundtrip          # Analyse-Test für alle Instrumente
+./build/psyforge_test_artefacts/Release/psyforge_test analyze 2 snare.wav
 ```
 
 ## Aufbau
 
 | Datei | Inhalt |
 |---|---|
-| `Source/Engine.h` | Klang-Engine (Kick, Bass, Ducking, Offline-Render), ohne JUCE |
-| `Source/ParamTable.h` | alle Parameter: IDs, Bereiche, Hilfetexte |
-| `Source/Presets.h` | Werks-Presets |
+| `Source/Engine.h` | Kick und Bass, Filter, Hilfsfunktionen |
+| `Source/Drums.h` | Snare, Clap, Hats/Ride, Perc, Zap, Riser |
+| `Source/Synth.h` | ein Instrument pro Instanz, Drum-Map, Render-Funktionen |
+| `Source/ParamTable.h` | alle Parameter (IDs, Bereiche, Hilfetexte) |
+| `Source/Presets.h` | Werks-Presets pro Instrument |
+| `Source/Patterns.*` | Song-Patterns aus Goadrums, MIDI-Export |
+| `Source/Clip.h` | MIDI-Clip-Import und -Filter |
 | `Source/Analysis.h` | WAV-Analyse und automatische Anpassung (Pattern-Search + CMA-ES) |
-| `Source/PluginProcessor.*` | Plugin: MIDI-Kanäle, Ausgänge, Presets, Export, Analyse-Thread |
+| `Source/PluginProcessor.*` | Plugin: Spur-MIDI, Pattern-Wiedergabe, Ducking-Link, Export, Analyse-Thread |
 | `Source/PluginEditor.*` | Oberfläche |
